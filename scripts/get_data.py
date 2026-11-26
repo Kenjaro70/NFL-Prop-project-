@@ -41,17 +41,23 @@ def dest_for_season(season: int, out_dir: Path) -> Path:
 def download(url: str, dest: Path, force: bool = False) -> bool:
     """Download url to dest. Returns False (and does nothing) if dest exists.
 
-    Writes to a ".part" file first and renames at the end, so an interrupted
-    download never leaves a half-written parquet behind.
+    Writes to a ".part" file, checks it is a readable non-empty parquet, and
+    only then renames it to dest. On any error the ".part" file is deleted, so
+    an interrupted or bogus download never leaves a broken parquet behind.
     """
     dest = Path(dest)
     if dest.exists() and not force:
         return False
     part = dest.with_suffix(".parquet.part")
-    with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as fh:
-        while chunk := resp.read(1 << 20):
-            fh.write(chunk)
-    part.replace(dest)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as fh:
+            while chunk := resp.read(1 << 20):
+                fh.write(chunk)
+        verify(part)  # a bad download must never become the real file
+        part.replace(dest)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     return True
 
 

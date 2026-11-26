@@ -28,6 +28,8 @@
 --                 ONLY when the line did not move: no-vig probabilities at
 --                 different lines are not comparable, so otherwise NULL.
 --   beat_close:   line moved our way, or same line and our side got pricier.
+--                 NULL when the close is unknown (close_line or a close price
+--                 missing/invalid): we can't say whether we beat it.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE TABLE bet_results AS
 WITH
@@ -72,6 +74,8 @@ side_probs AS (
 ),
 
 -- Grade the bet at the open line. A whole-number line can land exactly -> push.
+-- 'push' ONLY on an exact tie; if actual or open_line is NULL every comparison
+-- is NULL and result stays NULL (a pipeline check asserts that never happens).
 graded AS (
     SELECT
         *,
@@ -81,7 +85,7 @@ graded AS (
         CASE
             WHEN actual > open_line THEN 'over'
             WHEN actual < open_line THEN 'under'
-            ELSE 'push'
+            WHEN actual = open_line THEN 'push'
         END AS result
     FROM side_probs
 )
@@ -107,13 +111,19 @@ SELECT
     side_open_price,
     clv_line_pts,
     clv_prob,
-    -- coalesce: clv_prob is NULL when the line moved; then only the line counts
-    clv_line_pts > 0 OR (clv_line_pts = 0 AND coalesce(clv_prob > 0, FALSE)) AS beat_close,
+    CASE
+        -- close unknown -> can't tell (nv_close_* is NULL if a close price is
+        -- missing or invalid)
+        WHEN close_line IS NULL OR nv_close_over IS NULL THEN NULL
+        -- coalesce: clv_prob is NULL when the line moved; then only the line counts
+        ELSE clv_line_pts > 0 OR (clv_line_pts = 0 AND coalesce(clv_prob > 0, FALSE))
+    END AS beat_close,
     result,
     -- NULL on a push: it was neither won nor lost
     CASE WHEN result = 'push' THEN NULL ELSE result = side END AS side_won,
     -- profit on a 1-unit stake at the side's OPEN price; push returns the stake
     CASE
+        WHEN result IS NULL  THEN NULL
         WHEN result = 'push' THEN 0.0
         WHEN result = side   THEN american_profit(side_open_price)
         ELSE -1.0
@@ -126,8 +136,14 @@ ORDER BY odds_id;
 -- clv_summary
 -- Grain: market
 --
--- roi = total profit / units risked on bets that were actually decided
--- (a push hands the stake back, so it risks nothing).
+-- Two ROI conventions, both 1 unit staked per bet:
+--   roi           = total profit / non-push bets  (a push hands the stake back,
+--                   so only decided bets count as money risked)
+--   roi_all_bets  = total profit / all bets       (every bet counts as a stake)
+-- They only differ when there are pushes.
+--
+-- pct_beat_close: avg of beat_close as 1.0/0.0. avg() skips NULLs, so bets
+-- whose close is unknown are left out instead of counted as "didn't beat".
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE TABLE clv_summary AS
 SELECT
@@ -136,10 +152,11 @@ SELECT
     count(*) FILTER (WHERE result = 'push')               AS n_pushes,
     avg(clv_line_pts)                                     AS avg_clv_line_pts,
     avg(clv_prob)                                         AS avg_clv_prob,
-    avg(CASE WHEN beat_close THEN 1.0 ELSE 0.0 END)       AS pct_beat_close,
+    avg(beat_close::DOUBLE)                               AS pct_beat_close,
     sum(profit_units)                                     AS total_profit_units,
     sum(profit_units)
-        / nullif(count(*) FILTER (WHERE result <> 'push'), 0) AS roi
+        / nullif(count(*) FILTER (WHERE result <> 'push'), 0) AS roi,
+    sum(profit_units) / count(*)                          AS roi_all_bets
 FROM bet_results
 GROUP BY market
 ORDER BY market;

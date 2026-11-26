@@ -54,11 +54,24 @@ Linear form: `raw_player_stats -> stg_player_week / player_name_xwalk ->
 player_features -> player_projections -> stg_odds -> market_lines ->
 bet_results -> clv_summary / calibration_buckets`.
 
+## Known risks
+
+* **Evaluation set is selected on outcome.** nflverse weekly stats omit most
+  games where a player recorded nothing. Lines are matched at player-week
+  grain, so a line on a player who was active but had zero stats falls out as
+  `no_game` instead of being graded (it would almost always be an under). This
+  biases ROI and calibration toward overs. The fix is a roster / snap-count
+  source that says who was active.
+* All odds are FAKE (see the warning above).
+* See `PLAN.md` section 4 for the full list.
+
 ## Model in one paragraph
 
 A player's projection for a stat is the average of that stat over his last 6
 regular-season games (crossing season boundaries, never including the game
 itself), once he has at least 3. The spread is the standard deviation of past
 projection errors for that market across all players, using only earlier
-weeks. P(over) at the opening line comes from a normal approximation; the bet
+weeks. A line is matched to the player who played that week under that
+name and team (team at game time; no game that week -> void, `no_game`).
+P(over) at the opening line comes from a normal approximation; the bet
 side is whichever side the model likes more than the no-vig market price.

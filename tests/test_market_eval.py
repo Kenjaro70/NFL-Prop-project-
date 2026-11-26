@@ -35,11 +35,11 @@ def test_market_join_has_no_fanout(con):
 
 def test_match_status_counts(con):
     got = dict(rows(con, "SELECT match_status, count(*) FROM market_lines GROUP BY ALL"))
-    assert got == {"matched": 9, "ambiguous_name": 1, "no_player": 1, "no_projection": 1}
+    assert got == {"matched": 9, "ambiguous_name": 1, "no_player": 1, "no_game": 1}
     status = dict(rows(con, "SELECT odds_id, match_status FROM market_lines"))
     assert status[10] == "ambiguous_name"
     assert status[11] == "no_player"
-    assert status[12] == "no_projection"
+    assert status[12] == "no_game"  # Kelce has no game in week 7
 
 
 def test_aliases_resolve_to_expected_players(con):
@@ -126,3 +126,40 @@ def test_calibration_counts_match_non_push_bets(con):
     for lo, hi in rows(con, "SELECT bucket_lo, bucket_hi FROM calibration_buckets"):
         assert lo in {round(i / 10, 1) for i in range(10)}
         assert hi == pytest.approx(lo + 0.1)
+
+
+def test_invalid_american_prices_give_null(con):
+    # prices strictly between -100 and +100 don't exist in American odds
+    assert rows(con, """
+        SELECT american_to_prob(0), american_to_prob(-50), american_profit(99),
+               american_to_prob(-100), american_profit(100)
+    """) == [(None, None, None, 0.5, 1.0)]
+
+
+def _odds_file(tmp_path, lines):
+    header = ("source,odds_id,book,season,week,player_name,team,market,open_line,"
+              "open_over_price,open_under_price,close_line,close_over_price,close_under_price")
+    path = tmp_path / "FAKE_small_odds.csv"
+    path.write_text("\n".join([header, *lines]) + "\n")
+    return path
+
+
+def test_bad_odds_stale_team_and_unknown_close(stats_frame, tmp_path):
+    from src.pipeline import run_pipeline
+
+    stats = tmp_path / "stats.parquet"
+    stats_frame.to_parquet(stats, index=False)
+    odds = _odds_file(tmp_path, [
+        "FAKE,1,b,2023,5,DJ Moore,CHI,rec_yds,70.5,50,-110,70.5,-110,-110",   # invalid price
+        "FAKE,2,b,2023,5,DJ Moore,CHI,rec_yds,,-110,-110,70.5,-110,-110",     # no open line
+        "FAKE,3,b,2023,5,Marquise Brown,ARI,rec_yds,50.5,-110,-110,50.5,-110,-110",  # stale team
+        "FAKE,4,b,2023,5,DJ Moore,CHI,rec_yds,70.5,-110,-110,,,",             # close unknown
+    ])
+    c = run_pipeline(stats_path=stats, odds_path=odds)
+    status = dict(rows(c, "SELECT odds_id, match_status FROM market_lines"))
+    assert status == {1: "bad_odds", 2: "bad_odds", 3: "no_game", 4: "matched"}
+    [(beat, clv_prob, result)] = rows(c, "SELECT beat_close, clv_prob, result FROM bet_results")
+    assert beat is None and clv_prob is None and result is not None
+    [(pct,)] = rows(c, "SELECT pct_beat_close FROM clv_summary")
+    assert pct is None  # the only bet has an unknown close: ignored, not counted as 0
+    c.close()

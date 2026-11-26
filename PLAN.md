@@ -22,12 +22,14 @@ decisions, file specs, work order, risks.
 | Projection | projection = rolling avg of the same stat. Markets/eligibility: `pass_yds`(QB)←passing_yards; `rush_yds`(QB,RB)←rushing_yards; `rec_yds`(RB,WR,TE)←receiving_yards; `receptions`(RB,WR,TE)←receptions. avg_targets/avg_carries kept as features. | Deliberately simple. |
 | Model SD | residual = actual − projection; per market `stddev_samp(residual) OVER (PARTITION BY market ORDER BY week_index RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)`, `week_index = season*100 + week`; also count; usable only if `n_sd_obs >= 5` | Only strictly earlier weeks → no leakage. |
 | Model prob | `p_over_model = 1 - normal_cdf((open_line - projection) / model_sd)` at the **open** line (bet placed at open) | Normal approx. |
-| No-vig | `american_to_prob(p)` = `-p/(-p+100)` if p<0 else `100/(p+100)`; nv over = `imp_over/(imp_over+imp_under)`, for open and close | |
+| No-vig | `american_to_prob(p)` = `-p/(-p+100)` if p<0 else `100/(p+100)`; **NULL when −100 < p < 100** (not a valid American price; same for `american_profit`); nv over = `imp_over/(imp_over+imp_under)`, for open and close | |
 | Side | `edge_over = p_over_model - nv_open_over`; side = 'over' if `edge_over >= 0` else 'under' | |
-| CLV | `clv_line_pts = close_line - open_line` (over) / `open_line - close_line` (under). `clv_prob = side_close_nv - side_open_nv` **only when open_line = close_line**, else NULL. `beat_close = clv_line_pts > 0 OR (clv_line_pts = 0 AND clv_prob > 0)` | No-vig probs at different lines aren't comparable. |
-| Outcome | graded at open_line: actual > line → 'over', < → 'under', = → 'push'; `side_won` NULL on push; `profit_units` at side's open price: win +price/100 (price>0) or +100/−price (price<0), loss −1, push 0 | |
+| CLV | `clv_line_pts = close_line - open_line` (over) / `open_line - close_line` (under). `clv_prob = side_close_nv - side_open_nv` **only when open_line = close_line**, else NULL. `beat_close = clv_line_pts > 0 OR (clv_line_pts = 0 AND clv_prob > 0)`; **NULL when close_line or a close price is missing/invalid**; `pct_beat_close = avg(beat_close::DOUBLE)` (NULLs ignored) | No-vig probs at different lines aren't comparable. |
+| Outcome | graded at open_line: actual > line → 'over', < → 'under', = → 'push', **else NULL** (a check asserts no bet has NULL result); `side_won` NULL on push; `profit_units` at side's open price: win +price/100 (price>0) or +100/−price (price<0), loss −1, push 0 | |
 | Calibration | `p_over_model` vs actual over, pushes excluded; `bucket_lo = least(floor(p*10)/10, 0.9)` → 10 buckets of 0.1 | |
-| Crosswalk grain | one row per `(player_id, season, join_key)`; `is_ambiguous` = >1 distinct player_id share `(season, join_key)`. Ambiguous keys are **never matched**. | |
+| Crosswalk grain | one row per `(player_id, season, join_key)`; `is_ambiguous` = >1 distinct player_id share `(season, join_key)` — **descriptive only**. | |
+| Match grain (revised) | odds resolved at **player-WEEK** grain: `(season, week, join_key)` against `stg_player_week`. Team must be the team at game time; ambiguity = >1 distinct player_id with that key **in that week**. Keys ending `\|?` never match. Status order: `bad_odds` → `no_player` → `no_game` → `ambiguous_name` → `insufficient_history` → `matched`. | Season grain silently accepted stale teams (McCaffrey SF in a CAR week) and let a namesake who joined later flip an earlier line to ambiguous (identity leakage). Mirrors the sportsbook rule: a prop on a player who doesn't play is void. |
+| ROI | `roi` = profit / non-push bets (push risks nothing); `roi_all_bets` = profit / all bets. Both kept. | Two common conventions. |
 | Outputs | every SQL output is a TABLE (`CREATE OR REPLACE TABLE`), never a view — a saved .duckdb reopens without UDFs. Only `raw_player_stats` and `raw_odds` are views (created by pipeline.py). | |
 | UDFs | `normalize_name, normalize_team, canonical_name, build_key(name, team), normal_cdf`, all `null_handling="special"` | Extends the original contract: `join_key` must equal `resolve.build_key`; DuckDB lacks erf. |
 
@@ -50,7 +52,7 @@ decisions, file specs, work order, risks.
 - `create_raw_views(con, stats_path, odds_path)`: if `glob.glob(str(stats_path))` empty → `FileNotFoundError("No stats parquet at ... run `make data`")`; `CREATE OR REPLACE VIEW raw_player_stats AS SELECT * FROM read_parquet('<abs>', union_by_name = true)`; `CREATE OR REPLACE VIEW raw_odds AS SELECT * FROM read_csv('<abs>', header = true, columns = {...})` with types `source VARCHAR, odds_id INTEGER, book VARCHAR, season INTEGER, week INTEGER, player_name VARCHAR, team VARCHAR, market VARCHAR, open_line DOUBLE, open_over_price INTEGER, open_under_price INTEGER, close_line DOUBLE, close_over_price INTEGER, close_under_price INTEGER`.
 - `sql_files(sql_dir)` → `sorted(sql_dir.glob("[0-9][0-9]_*.sql"))`.
 - `run_sql_files(con, sql_dir)`: `con.execute(path.read_text())` each; re-raise with filename; return names.
-- `CHECKS` (name, query that must return 0): `stg_player_week_dupes`, `features_rowcount_mismatch` (player_features vs stg), `projection_dupes` on `(player_id, season, week, market)`, `market_fanout` (market_lines − stg_odds), `bet_rowcount_mismatch` (bet_results − matched market_lines).
+- `CHECKS` (name, query that must return 0): `stg_player_week_dupes`, `features_rowcount_mismatch` (player_features vs stg), `projection_dupes` on `(player_id, season, week, market)`, `market_fanout` (market_lines − stg_odds), `bet_rowcount_mismatch` (bet_results − matched market_lines), `{stg_odds,market_lines,bet_results}_odds_id_dupes` (count − count distinct odds_id), `bet_results_ungraded` (result NULL).
 - `run_checks(con)`: AssertionError listing all failures.
 - `run_pipeline(stats_path=DEFAULT_STATS, odds_path=DEFAULT_ODDS, db_path=":memory:")`: connect → UDFs → views → SQL → checks → return con.
 - `summarize(con)`: row counts of `stg_player_week, player_name_xwalk, player_features, player_projections, stg_odds, market_lines, bet_results, clv_summary, calibration_buckets`; `match_status` counts; `report_unmatched(stg_odds season||':'||join_key, xwalk season||':'||join_key, label="odds")`.
@@ -82,13 +84,13 @@ Header: what it builds, input `raw_player_stats`, UDFs used.
   Comment: SD pooled across players, strictly earlier weeks.
 
 ### 2.5 `sql/03_market.sql`
-- Macros: `american_to_prob(price)`, `american_profit(price)` (profit per 1 unit staked).
+- Macros: `american_to_prob(price)`, `american_profit(price)` (profit per 1 unit staked); both NULL for −100 < price < 100.
 - **`stg_odds`** (one row per CSV row): `raw_odds.*` with `team → team_raw`, `team = normalize_team(team_raw)`, `join_key = build_key(player_name, team_raw)`; CTEs `implied` → `no_vig` → `nv_open_over, nv_open_under, nv_close_over, nv_close_under`.
-- **`market_lines`** (exactly one row per stg_odds row; LEFT JOINs only): CTE `xwalk_by_key` (`season, join_key, count(DISTINCT player_id) n_players, min(player_id) any_player_id` grouped — unique per key so can't fan out); `odds_player` (stg_odds LEFT JOIN xwalk_by_key USING (season, join_key); `player_id = CASE WHEN n_players = 1 THEN any_player_id END`); `odds_proj` (LEFT JOIN player_projections on player_id, season, week, market). `match_status`: `'no_player'` (n_players NULL), `'ambiguous_name'` (>1), `'no_projection'` (projection or model_sd NULL), else `'matched'`. `p_over_model = 1 - normal_cdf((open_line - projection) / model_sd)`. Keep odds/lines/prices, nv_* probs, projection, model_sd, n_prior_games, actual, p_over_model, player_id, join_key, team_raw, team, source, book.
+- **`market_lines`** (exactly one row per stg_odds row; LEFT JOINs only). *Revised to player-week grain.* CTEs: `season_keys` (DISTINCT season, join_key from player_name_xwalk — only distinguishes no_player from no_game); `week_keys` (stg_player_week grouped by season, week, join_key: `count(DISTINCT player_id) n_players, min(player_id) any_player_id` — unique so can't fan out); `odds_player` (LEFT JOIN both, with `o.join_key NOT LIKE '%|?'` in the ON clause; `player_id = CASE WHEN n_players = 1 THEN any_player_id END`); `odds_proj` (LEFT JOIN player_projections on player_id, season, week, market); `labelled`. `match_status` in order: `'bad_odds'` (open_line NULL or an open price NULL/invalid), `'no_player'` (key not in that season, or `|?`), `'no_game'` (no game under that key that week; player_id NULL), `'ambiguous_name'` (n_players > 1), `'insufficient_history'` (projection or model_sd NULL/0), else `'matched'`. `p_over_model = 1 - normal_cdf((open_line - projection) / model_sd)`. Keep odds/lines/prices, nv_* probs, projection, model_sd, n_prior_games, actual, p_over_model, player_id, join_key, team_raw, team, source, book.
 
 ### 2.6 `sql/04_eval.sql`
 - **`bet_results`** from matched market_lines; CTEs `decide` → `side_probs` → `graded`. Columns: `odds_id, player_id, season, week, market, open_line, close_line, projection, model_sd, actual, p_over_model, nv_open_over, edge_over, side, side_model_prob, side_open_prob, side_close_prob, side_open_price, clv_line_pts, clv_prob, beat_close, result, side_won, profit_units`.
-- **`clv_summary`** by market: `n_bets, n_pushes, avg_clv_line_pts, avg_clv_prob, pct_beat_close, total_profit_units, roi`.
+- **`clv_summary`** by market: `n_bets, n_pushes, avg_clv_line_pts, avg_clv_prob, pct_beat_close, total_profit_units, roi, roi_all_bets`.
 - **`calibration_buckets`** (non-push): `bucket_lo, bucket_hi, n_bets, avg_model_prob, actual_over_rate, avg_market_prob, gap = actual_over_rate - avg_model_prob`, ordered.
 
 ### 2.7 `tests/fixtures/FAKE_odds.csv` (all `source = FAKE`)
@@ -107,8 +109,8 @@ FAKE,10,fakebook,2023,3,Mike Williams,LAC,rec_yds,52.5,-110,-110,52.5,-110,-110
 FAKE,11,fakebook,2023,2,Joe Nobody,NYJ,rec_yds,30.5,-110,-110,30.5,-110,-110
 FAKE,12,fakebook,2023,7,Travis Kelce,KC,receptions,5.5,-110,-110,5.5,-110,-110
 ```
-Rows: 1–2 "D.J." punctuation (line move / same line + price move); 3 override + ARZ→ARI, week-2 needs prior-season history; 4 traded to KC; 5 whole-number push (actual 5) + full team name; 6 override Ken Walker; 7 same line, price move; 8 JAC→JAX; 9 pass_yds (7 prior residuals ≥ 5); 10 ambiguous; 11 unknown player; 12 no game that week → no_projection.
-**Expected match_status: matched 9, ambiguous_name 1, no_player 1, no_projection 1.**
+Rows: 1–2 "D.J." punctuation (line move / same line + price move); 3 override + ARZ→ARI, week-2 needs prior-season history; 4 traded to KC; 5 whole-number push (actual 5) + full team name; 6 override Ken Walker; 7 same line, price move; 8 JAC→JAX; 9 pass_yds (7 prior residuals ≥ 5); 10 ambiguous; 11 unknown player; 12 no game that week → no_game.
+**Expected match_status: matched 9, ambiguous_name 1, no_player 1, no_game 1.** (Row 10: both Mike Williamses play week 3 → ambiguous at week grain too.)
 
 ### 2.8 `tests/fixtures/README.md`
 FAKE_odds.csv is invented; numbers from it are meaningless; schema + per-row purpose; stats fixture is generated in `tests/conftest.py`.
@@ -165,10 +167,11 @@ Quickstart, table lineage (`raw_player_stats → stg_player_week / player_name_x
 3. Window counts recorded games; early-season windows reach into the prior season.
 4. nflverse only has rows where a player recorded a stat → zero-stat healthy games missing (biases fringe players up); in-game injuries drag averages down.
 5. Cross-season partition carries stale history across team/role changes; rookies have no projection until game 4.
-6. Traded players matched on team-at-game-time; a stale book team → `no_player` (visible in report_unmatched). Unknown team alias → `|?`.
-7. Name collisions flagged `is_ambiguous` and excluded, never guessed.
+6. Traded players matched on team-at-game-time (player-week grain); a stale book team → `no_game` (or `no_player` if the key never existed that season). Unknown team alias → `|?`, never matched.
+7. Name collisions in the same week → `ambiguous_name`, never guessed. `player_name_xwalk.is_ambiguous` is a season-level descriptive flag only.
 8. Whole-number lines push (graded 0, excluded from calibration); normal approx ignores push mass; poor fit for low-volume receptions.
 9. One pooled SD per market; needs ≥5 prior residuals, so the earliest 2021 weeks get no probability.
 10. Probability CLV only defined when the line didn't move; otherwise only `clv_line_pts`.
 11. **All ROI/CLV/calibration numbers are from FAKE odds** — real historical lines are a future data source.
 12. Pinned to the legacy `player_stats` release.
+13. **Evaluation set is selected on outcome.** nflverse omits most zero-stat games, so a line where the player was active but recorded nothing falls out as `no_game` instead of being graded (a near-certain under). This biases ROI and calibration toward overs. Future fix: a roster / snap-count source to know who was active.

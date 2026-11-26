@@ -9,7 +9,8 @@
 --                 match_status and the model's P(over)
 --
 -- Inputs: raw_odds            (view over the odds CSV, made by src/pipeline.py)
---         player_name_xwalk   (01_staging.sql)
+--         stg_player_week     (01_staging.sql)  who played which week
+--         player_name_xwalk   (01_staging.sql)  which keys exist each season
 --         player_projections  (02_features.sql)
 -- UDFs:   normalize_team, build_key, normal_cdf  (Python, src/pipeline.py)
 -- =============================================================================
@@ -22,15 +23,23 @@
 --   -110 -> 110/210 = 0.5238    +150 -> 100/250 = 0.40    +100 -> 0.50
 -- american_profit: profit on a winning 1-unit stake.
 --   -110 -> 100/110 = 0.909     +150 -> 1.50
+--
+-- Both return NULL for a price strictly between -100 and +100 (e.g. 0, -50,
+-- 75). American odds never live there: a price is either >= +100 (underdog)
+-- or <= -100 (favourite). Such a value is a data error, and the formulas would
+-- otherwise produce nonsense (price 0 -> "probability" 1.0, profit 1/0).
+-- A NULL price stays NULL, and market_lines labels the row 'bad_odds'.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE MACRO american_to_prob(price) AS
     CASE
+        WHEN price > -100 AND price < 100 THEN NULL
         WHEN price < 0 THEN -price / (-price + 100.0)
         ELSE 100.0 / (price + 100.0)
     END;
 
 CREATE OR REPLACE MACRO american_profit(price) AS
     CASE
+        WHEN price > -100 AND price < 100 THEN NULL
         WHEN price > 0 THEN price / 100.0
         ELSE 100.0 / -price
     END;
@@ -112,13 +121,27 @@ ORDER BY odds_id;
 -- market_lines
 -- Grain: odds_id - EXACTLY one row per stg_odds row.
 --
+-- Matching happens at PLAYER-WEEK grain: an odds row (season, week, join_key)
+-- is resolved against the stg_player_week rows of THAT SAME week. That means
+--   * the team must be the player's team AT GAME TIME. A stale team on the
+--     line ("McCaffrey, SF" in a week he played for CAR) does not match;
+--   * "ambiguous" means >1 different players with that join_key played in
+--     that same week. A namesake who joins the team later cannot change how
+--     an earlier line was matched (that would be leakage through identity).
+-- This mirrors the sportsbook rule: a prop on a player who doesn't play is
+-- void. So a line with no game that week is never graded.
+--
 -- Only LEFT JOINs, and every right-hand side is unique on its join columns,
 -- so a line can never be duplicated ("fan out") or dropped. Lines that cannot
--- be used are kept and labelled by match_status:
---   'no_player'       no player has this (season, join_key)
---   'ambiguous_name'  more than one player has it -> never guess
---   'no_projection'   player found, but no projection / model_sd that week
---   'matched'         usable
+-- be used are kept and labelled by match_status, checked IN THIS ORDER:
+--   'bad_odds'             open_line missing, or an open price missing/invalid
+--   'no_player'            join_key never seen in that season, or the team is
+--                          unknown ('|?' keys never match, even each other)
+--   'no_game'              key known that season, but no game that week
+--                          (bye, inactive, traded away, or stale team)
+--   'ambiguous_name'       >1 player with this key played that week -> never guess
+--   'insufficient_history' player played, but no projection or model_sd yet
+--   'matched'              usable
 --
 -- p_over_model is evaluated at the OPEN line, because the bet is assumed to be
 -- placed at the open:
@@ -126,29 +149,48 @@ ORDER BY odds_id;
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE TABLE market_lines AS
 WITH
--- Collapse the crosswalk to one row per (season, join_key). It is unique on
--- those columns, so joining it to the odds cannot fan out. A traded player has
--- two keys (one per team) and each maps back to him.
-xwalk_by_key AS (
+-- Every key that exists in each season (any week). Only used to tell
+-- 'no_player' (never heard of him) apart from 'no_game' (known, didn't play).
+season_keys AS (
+    SELECT DISTINCT
+        season,
+        join_key
+    FROM player_name_xwalk
+),
+
+-- Who played in each week under each key. Unique on (season, week, join_key),
+-- so joining it to the odds cannot fan out.
+week_keys AS (
     SELECT
         season,
+        week,
         join_key,
         count(DISTINCT player_id) AS n_players,
         min(player_id)            AS any_player_id
-    FROM player_name_xwalk
-    GROUP BY season, join_key
+    FROM stg_player_week
+    GROUP BY season, week, join_key
 ),
 
--- Attach a player_id, but only when exactly one player owns the key.
+-- Attach the season-level and week-level lookups to each line.
+-- Keys ending in '|?' (team unknown) are excluded from both lookups:
+-- "unknown" is not a team, so two unknowns must never match each other.
 odds_player AS (
     SELECT
         o.*,
-        x.n_players,
-        CASE WHEN x.n_players = 1 THEN x.any_player_id END AS player_id
+        sk.join_key IS NOT NULL AS key_in_season,
+        wk.n_players,
+        -- a player_id only when exactly one player owns the key that week
+        CASE WHEN wk.n_players = 1 THEN wk.any_player_id END AS player_id
     FROM stg_odds AS o
-    LEFT JOIN xwalk_by_key AS x
-           ON x.season = o.season
-          AND x.join_key = o.join_key
+    LEFT JOIN season_keys AS sk
+           ON sk.season   = o.season
+          AND sk.join_key = o.join_key
+          AND o.join_key NOT LIKE '%|?'
+    LEFT JOIN week_keys AS wk
+           ON wk.season   = o.season
+          AND wk.week     = o.week
+          AND wk.join_key = o.join_key
+          AND o.join_key NOT LIKE '%|?'
 ),
 
 -- Attach the projection for that player, week and market.
@@ -168,16 +210,22 @@ odds_proj AS (
           AND pp.market    = op.market
 ),
 
--- Label each line and compute the model probability.
+-- Label each line (first matching rule wins) and compute the model probability.
 labelled AS (
     SELECT
         *,
         CASE
-            WHEN n_players IS NULL THEN 'no_player'
-            WHEN n_players > 1     THEN 'ambiguous_name'
+            -- imp_open_* is NULL when the price is NULL or not a valid American price
+            WHEN open_line IS NULL
+              OR imp_open_over IS NULL
+              OR imp_open_under IS NULL  THEN 'bad_odds'
+            WHEN NOT key_in_season       THEN 'no_player'
+            WHEN n_players IS NULL       THEN 'no_game'
+            WHEN n_players > 1           THEN 'ambiguous_name'
             -- model_sd = 0 would divide by zero below; treat it as unusable
-            WHEN projection IS NULL OR model_sd IS NULL OR model_sd = 0
-                                   THEN 'no_projection'
+            WHEN projection IS NULL
+              OR model_sd IS NULL
+              OR model_sd = 0            THEN 'insufficient_history'
             ELSE 'matched'
         END AS match_status,
         1 - normal_cdf((open_line - projection) / nullif(model_sd, 0)) AS p_over_model

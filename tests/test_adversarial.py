@@ -273,7 +273,8 @@ def test_exactly_three_prior_games_gets_a_projection_two_does_not(stats_frame, t
     expected = np.mean([75 + 5 * ((w + 2023) % 4) for w in (1, 2, 3)])
     assert p.projection.iloc[3] == pytest.approx(expected)
     status = dict(con.execute("SELECT odds_id, match_status FROM market_lines").fetchall())
-    assert status == {1: "no_projection", 2: "matched"}
+    # spec change: "no_projection" was renamed "insufficient_history"
+    assert status == {1: "insufficient_history", 2: "matched"}
     con.close()
 
 
@@ -292,7 +293,7 @@ def test_single_season_player_has_no_history_and_no_other_season_key(stats_frame
     got = {r[0]: r[1:] for r in con.execute(
         "SELECT odds_id, match_status, player_id FROM market_lines").fetchall()}
     assert got[1] == ("no_player", None)          # no 2022 key for him
-    assert got[2] == ("no_projection", "00-0000077")
+    assert got[2] == ("insufficient_history", "00-0000077")  # renamed from no_projection
     con.close()
 
 
@@ -340,7 +341,9 @@ def test_odds_week_with_no_stats_at_all(stats_frame, tmp_path):
     got = {r[0]: r[1:] for r in con.execute(
         "SELECT odds_id, match_status, player_id, projection, p_over_model FROM market_lines"
     ).fetchall()}
-    assert got[1] == ("no_projection", DJ_MOORE, None, None)
+    # spec change: matching is per player-WEEK; no game that week -> 'no_game',
+    # and no player_id is attached (the player is resolved from that week's games)
+    assert got[1] == ("no_game", None, None, None)
     assert got[2] == ("no_player", None, None, None)
     assert con.execute("SELECT count(*) FROM bet_results").fetchall() == [(0,)]
     con.close()
@@ -513,7 +516,8 @@ def test_row_counts_match_plan_with_trade_and_name_collision_same_week(stats_fra
     assert got[1] == ("ambiguous_name", None)
     assert got[2] == ("matched", "00-0000011")
     assert got[3] == ("matched", "00-0000004")
-    assert got[4][1] == "00-0000004"
+    # spec change: a stale team (Brown was on KC by week 4) is no longer accepted
+    assert got[4] == ("no_game", None)
     assert got[5] == ("matched", KELCE)
     assert got[6] == ("matched", "00-0000012")
     amb = frame(con, """SELECT DISTINCT join_key FROM player_name_xwalk

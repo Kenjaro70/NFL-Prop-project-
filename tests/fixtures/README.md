@@ -21,6 +21,11 @@ Schema (one row per player-market line):
 | open_line, close_line | DOUBLE | the line at open and at close |
 | open_over_price, open_under_price, close_over_price, close_under_price | INTEGER | American odds |
 
+Lines are matched at player-WEEK grain (season, week, name+team key), and
+labelled in this order: `bad_odds`, `no_player`, `no_game`, `ambiguous_name`,
+`insufficient_history`, `matched`. Expected: matched 9, ambiguous_name 1,
+no_player 1, no_game 1.
+
 What each row tests:
 
 | odds_id | purpose | expected match_status |
@@ -34,9 +39,23 @@ What each row tests:
 | 7 | same line, price move -> probability CLV | matched |
 | 8 | JAC -> JAX | matched |
 | 9 | pass_yds market (7 earlier residuals >= 5 needed for model_sd) | matched |
-| 10 | two "Mike Williams" on LAC in 2023 | ambiguous_name |
+| 10 | two "Mike Williams" on LAC, both play 2023 week 3 | ambiguous_name |
 | 11 | unknown player | no_player |
-| 12 | Kelce has no game in week 7 | no_projection |
+| 12 | Kelce has no game in week 7 (a prop on a player who doesn't play is void) | no_game |
+
+## Why `make pipeline` on REAL stats shows different counts
+
+`make pipeline` runs the same FAKE odds against the real nflverse stats, not
+against the test stats fixture. The odds rows were written for the fixture's
+invented world, so some of them don't hold in the real one. For example:
+
+* row 4, "Hollywood Brown, KC, 2023": in reality Marquise Brown was on ARI in
+  2023 and only joined KC in 2024 -> `no_player` on real data;
+* row 10: only one Mike Williams played for LAC in 2023 -> `matched`;
+* row 12: Kelce really did play 2023 week 7 -> `matched`.
+
+So the tests' 9/1/1/1 is about the fixture; the real-data summary is expected
+to differ, and neither set of CLV/ROI numbers means anything.
 
 ## Stats fixture
 

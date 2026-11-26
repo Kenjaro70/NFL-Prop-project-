@@ -103,12 +103,14 @@ ORDER BY player_id, season, week;
 -- Grain: player_id, season, join_key
 --
 -- A traded player gets one row per team he played for that season
--- (e.g. marquisebrown|ARI and marquisebrown|KC), so a sportsbook line is
--- matched to the team he was on at game time.
+-- (e.g. marquisebrown|ARI and marquisebrown|KC).
 --
--- is_ambiguous: more than one distinct player_id shares the same
--- (season, join_key) - e.g. two "Mike Williams" on LAC. Ambiguous keys are
--- NEVER matched downstream; we refuse to guess.
+-- is_ambiguous (DESCRIPTIVE ONLY): more than one distinct player_id shares the
+-- same (season, join_key) at some point in the season - e.g. two
+-- "Mike Williams" on LAC. Handy for spotting name collisions, but matching in
+-- 03_market.sql does NOT use it: it checks ambiguity per WEEK (who actually
+-- played that week), so a namesake who arrives later in the season can't
+-- change how an earlier line was matched.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE TABLE player_name_xwalk AS
 WITH

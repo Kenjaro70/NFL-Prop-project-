@@ -139,6 +139,19 @@ CHECKS = [
         """SELECT abs((SELECT count(*) FROM bet_results)
                     - (SELECT count(*) FROM market_lines WHERE match_status = 'matched'))""",
     ),
+    # odds_id is the grain of these three tables. The fan-out check above only
+    # compares counts, so a CSV that repeats an odds_id would slip through it.
+    *(
+        (
+            f"{table}_odds_id_dupes",
+            f"SELECT count(*) - count(DISTINCT odds_id) FROM {table}",
+        )
+        for table in ("stg_odds", "market_lines", "bet_results")
+    ),
+    (
+        "bet_results_ungraded",
+        "SELECT count(*) FROM bet_results WHERE result IS NULL",
+    ),
 ]
 
 
@@ -156,10 +169,14 @@ def run_checks(con) -> None:
 
 def run_pipeline(stats_path=DEFAULT_STATS, odds_path=DEFAULT_ODDS, db_path=":memory:"):
     con = duckdb.connect(str(db_path))
-    register_udfs(con)
-    create_raw_views(con, stats_path, odds_path)
-    run_sql_files(con)
-    run_checks(con)
+    try:
+        register_udfs(con)
+        create_raw_views(con, stats_path, odds_path)
+        run_sql_files(con)
+        run_checks(con)
+    except BaseException:
+        con.close()  # don't leak an open connection (or a locked .duckdb file)
+        raise
     return con
 
 

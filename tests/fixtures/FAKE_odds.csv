@@ -1,0 +1,13 @@
+source,odds_id,book,season,week,player_name,team,market,open_line,open_over_price,open_under_price,close_line,close_over_price,close_under_price
+FAKE,1,fakebook,2023,4,D.J. Moore,CHI,rec_yds,70.5,-110,-110,72.5,-115,-105
+FAKE,2,fakebook,2023,5,D.J. Moore,CHI,receptions,5.5,100,-120,5.5,-120,100
+FAKE,3,fakebook,2023,2,Hollywood Brown,ARZ,rec_yds,58.5,-110,-110,56.5,-110,-110
+FAKE,4,fakebook,2023,5,Hollywood Brown,KC,receptions,4.5,-130,110,5.5,105,-125
+FAKE,5,fakebook,2023,5,Travis Kelce,Kansas City Chiefs,receptions,5.0,-110,-110,5.0,-105,-115
+FAKE,6,fakebook,2023,3,Ken Walker,SEA,rush_yds,72.5,-110,-110,74.5,-110,-110
+FAKE,7,fakebook,2023,4,Christian McCaffrey,SF,rush_yds,85.5,-115,-105,85.5,-125,105
+FAKE,8,fakebook,2023,6,Evan Engram,JAC,rec_yds,44.5,-110,-110,43.5,-110,-110
+FAKE,9,fakebook,2023,6,Patrick Mahomes,KC,pass_yds,268.5,-110,-110,270.5,-110,-110
+FAKE,10,fakebook,2023,3,Mike Williams,LAC,rec_yds,52.5,-110,-110,52.5,-110,-110
+FAKE,11,fakebook,2023,2,Joe Nobody,NYJ,rec_yds,30.5,-110,-110,30.5,-110,-110
+FAKE,12,fakebook,2023,7,Travis Kelce,KC,receptions,5.5,-110,-110,5.5,-110,-110

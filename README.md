@@ -18,7 +18,12 @@ make test       # offline tests (no network, no data/ needed)
 ```
 
 `make data SEASONS="2023 2024"` downloads only some seasons.
-Open the result with `duckdb data/nfl.duckdb` (all outputs are plain tables).
+Query the result with `python3 scripts/q.py "SELECT ..."` (or the `duckdb`
+CLI if you have it); all outputs are plain tables.
+
+**Learning the code?** Start with [docs/PRACTICE.md](docs/PRACTICE.md): a guided
+tour, exercises with hidden answers, spot-the-bug drills and rewrite drills
+graded by the test suite.
 
 ## Layout
 
